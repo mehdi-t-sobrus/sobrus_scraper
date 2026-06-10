@@ -1,0 +1,38 @@
+name: "pipeline_silver"
+version: "1.0.0"
+config-version: 2
+
+profile: "pipeline_duckdb"
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target", "dbt_packages"]
+
+# ---------------------------------------------------------------------------
+# Model configurations
+# ---------------------------------------------------------------------------
+models:
+  pipeline_silver:
+    silver:
+      # All silver models are Python models writing Parquet to R2.
+      # DuckDB reads directly from R2 via the httpfs / S3 extension.
+      +materialized: table
+      +schema: silver
+
+vars:
+  # R2 / S3 connection — injected at runtime via env vars or Dagster run config
+  r2_endpoint_url:  "{{ env_var('R2_ENDPOINT_URL', '') }}"
+  r2_access_key:    "{{ env_var('R2_ACCESS_KEY_ID', '') }}"
+  r2_secret_key:    "{{ env_var('R2_SECRET_ACCESS_KEY', '') }}"
+  r2_bronze_bucket: "{{ env_var('R2_BRONZE_BUCKET', 'pipeline-bronze') }}"
+  r2_silver_bucket: "{{ env_var('R2_SILVER_BUCKET', 'pipeline-silver') }}"
+
+  # Local dev mode — reads from data/bronze/ and writes to data/silver/
+  # instead of Cloudflare R2. Set R2_LOCAL_DEV_MODE=True in .env.
+  local_dev_mode: "{{ env_var('R2_LOCAL_DEV_MODE', 'False') }}"
+
+  # Partition date window — default: today.  Override for backfills.
+  # Usage: dbt run --vars '{"start_date": "2024-01-01", "end_date": "2024-01-31"}'
+  start_date: "{{ env_var('DBT_START_DATE', (modules.datetime.date.today() - modules.datetime.timedelta(days=1)).isoformat()) }}"
+  end_date:   "{{ env_var('DBT_END_DATE',   modules.datetime.date.today().isoformat()) }}"

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipeline-backend"
+version = "0.1.0"
+description = "Django backend for the Medallion scraping pipeline"
+requires-python = ">=3.13"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "scraper_admin*", "products*"]

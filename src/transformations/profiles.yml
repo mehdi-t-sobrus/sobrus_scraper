@@ -1,0 +1,29 @@
+pipeline_duckdb:
+  # Use 'dev' target locally (reads/writes local data/ folder, no R2 needed)
+  # Use 'prod' target in production (reads/writes Cloudflare R2)
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+
+    prod:
+      type: duckdb
+      path: ":memory:"
+      extensions:
+        - httpfs
+        - json
+        - parquet
+      settings:
+        s3_endpoint:          "{{ env_var('R2_ENDPOINT_URL', '') | replace('https://', '') }}"
+        s3_access_key_id:     "{{ env_var('R2_ACCESS_KEY_ID', '') }}"
+        s3_secret_access_key: "{{ env_var('R2_SECRET_ACCESS_KEY', '') }}"
+        s3_region:            "auto"
+        s3_url_style:         "path"
+
+    dev:
+      type: duckdb
+      # Persistent local DuckDB file so you can inspect tables after a run
+      path: "dev.duckdb"
+      extensions:
+        - httpfs
+        - json
+        - parquet
+      # No S3 settings needed — dev mode reads/writes local data/ folder

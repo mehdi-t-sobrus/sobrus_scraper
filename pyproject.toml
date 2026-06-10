@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipeline"
+version = "0.1.0"
+description = "Medallion scraping pipeline"
+requires-python = ">=3.13"
+
+[tool.setuptools.packages.find]
+where = ["src/backend", "src"]
+include = ["core*", "scraper_admin*", "products*", "scrapers*"]
