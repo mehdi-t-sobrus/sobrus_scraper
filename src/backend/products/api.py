@@ -103,11 +103,235 @@ class DailyPriceLogIn(Schema):
 
 
 class PriceHistoryOut(Schema):
-    logged_at: datetime
-    price: Decimal
-    currency: str
-    in_stock: bool
-    site_id: UUID
+    """Single price log entry for time-series history."""
+    logged_at:  datetime
+    price:      Decimal
+    currency:   str
+    in_stock:   bool
+    site_id:    UUID
+
+
+class SitePriceOut(Schema):
+    """Current price for a product on a specific site."""
+    site_id:    UUID
+    site_name:  str
+    site_domain: str
+    price:      Decimal | None
+    currency:   str
+    in_stock:   bool
+    product_url: str
+    last_scraped_at: datetime | None
+
+
+class PriceComparisonOut(Schema):
+    """
+    Price comparison summary for a MasterProduct across all sites.
+    The core output of the pipeline — answers "where is this cheapest?"
+    """
+    master_product_id:   UUID
+    name:                str
+    brand:               str
+    ean:                 str
+    category:            str
+    # Aggregate pricing across all sites
+    price_min:           Decimal | None   # cheapest current price
+    price_max:           Decimal | None   # most expensive current price
+    price_avg:           Decimal | None   # average across sites
+    price_currency:      str
+    sites_count:         int              # number of sites selling this
+    in_stock_count:      int              # number of sites with stock
+    cheapest_site:       str | None       # domain of cheapest site
+    cheapest_url:        str | None       # direct link to cheapest listing
+    # Per-site breakdown
+    sites:               list[SitePriceOut]
+
+
+# ---------------------------------------------------------------------------
+# Price comparison endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/master/{product_id}/price-comparison/",
+    response=PriceComparisonOut,
+    summary="Price comparison for a product across all sites",
+)
+async def get_price_comparison(request, product_id: UUID) -> dict[str, Any]:
+    """
+    Returns current prices for a MasterProduct across all sites,
+    with min/max/avg aggregates and the cheapest site identified.
+
+    This is the core endpoint for the price comparison use case.
+    """
+    master = await aget_object_or_404(MasterProduct, id=product_id)
+
+    site_products = [
+        sp async for sp in
+        SiteProduct.objects.filter(master_product_id=product_id)
+        .select_related("site")
+        .order_by("current_price")
+    ]
+
+    if not site_products:
+        return {
+            "master_product_id": product_id,
+            "name": master.name,
+            "brand": master.brand,
+            "ean": master.ean,
+            "category": master.category,
+            "price_min": None,
+            "price_max": None,
+            "price_avg": None,
+            "price_currency": "MAD",
+            "sites_count": 0,
+            "in_stock_count": 0,
+            "cheapest_site": None,
+            "cheapest_url": None,
+            "sites": [],
+        }
+
+    # Build per-site list (already ordered by price ASC)
+    sites_data = [
+        SitePriceOut(
+            site_id=sp.site_id,
+            site_name=sp.site.name,
+            site_domain=sp.site.domain,
+            price=sp.current_price,
+            currency=sp.currency,
+            in_stock=sp.in_stock,
+            product_url=sp.product_url,
+            last_scraped_at=sp.last_scraped_at,
+        )
+        for sp in site_products
+    ]
+
+    # Compute aggregates from in-stock sites only (out-of-stock prices are stale)
+    priced = [sp for sp in site_products if sp.current_price is not None]
+    in_stock_priced = [sp for sp in priced if sp.in_stock]
+    comparison_pool = in_stock_priced if in_stock_priced else priced
+
+    price_min = min((sp.current_price for sp in comparison_pool), default=None)
+    price_max = max((sp.current_price for sp in comparison_pool), default=None)
+    price_avg = (
+        sum(sp.current_price for sp in comparison_pool) / len(comparison_pool)
+        if comparison_pool else None
+    )
+
+    cheapest = comparison_pool[0] if comparison_pool else None
+
+    return {
+        "master_product_id": product_id,
+        "name": master.name,
+        "brand": master.brand,
+        "ean": master.ean,
+        "category": master.category,
+        "price_min": price_min,
+        "price_max": price_max,
+        "price_avg": round(price_avg, 2) if price_avg else None,
+        "price_currency": priced[0].currency if priced else "MAD",
+        "sites_count": len(site_products),
+        "in_stock_count": sum(1 for sp in site_products if sp.in_stock),
+        "cheapest_site": cheapest.site.domain if cheapest else None,
+        "cheapest_url": cheapest.product_url if cheapest else None,
+        "sites": sites_data,
+    }
+
+
+@router.get(
+    "/price-comparison/",
+    response=list[PriceComparisonOut],
+    summary="Price comparison for all products — filterable by brand, category, name",
+)
+@paginate(PageNumberPagination, page_size=50)
+async def list_price_comparisons(
+    request,
+    brand: str | None = None,
+    category: str | None = None,
+    name: str | None = None,
+    in_stock_only: bool = False,
+    multi_site_only: bool = True,   # default: only show products on 2+ sites
+) -> Any:
+    """
+    The main price comparison listing — shows products sold on multiple sites
+    with their min/max/avg prices and cheapest site.
+
+    Designed for the price comparison dashboard.
+    """
+    from django.db.models import Avg, Count, Max, Min, Q
+
+    qs = MasterProduct.objects.filter(status="active")
+
+    if brand:
+        qs = qs.filter(brand__icontains=brand)
+    if category:
+        qs = qs.filter(category__icontains=category)
+    if name:
+        qs = qs.filter(name__icontains=name)
+
+    # Annotate with site count and price stats
+    qs = qs.annotate(
+        site_count=Count("site_products", distinct=True),
+        current_min=Min("site_products__current_price"),
+        current_max=Max("site_products__current_price"),
+        current_avg=Avg("site_products__current_price"),
+        in_stock_sites=Count(
+            "site_products",
+            filter=Q(site_products__in_stock=True),
+            distinct=True,
+        ),
+    )
+
+    if multi_site_only:
+        qs = qs.filter(site_count__gte=2)
+    if in_stock_only:
+        qs = qs.filter(in_stock_sites__gte=1)
+
+    qs = qs.order_by("brand", "name")
+
+    # Build response — fetch site products for each master
+    results = []
+    async for master in qs:
+        site_products = [
+            sp async for sp in
+            SiteProduct.objects.filter(master_product_id=master.id)
+            .select_related("site")
+            .order_by("current_price")
+        ]
+
+        priced      = [sp for sp in site_products if sp.current_price is not None]
+        in_stock    = [sp for sp in priced if sp.in_stock]
+        pool        = in_stock if in_stock else priced
+        cheapest    = pool[0] if pool else None
+
+        results.append({
+            "master_product_id": master.id,
+            "name":             master.name,
+            "brand":            master.brand,
+            "ean":              master.ean,
+            "category":         master.category,
+            "price_min":        min((sp.current_price for sp in pool), default=None),
+            "price_max":        max((sp.current_price for sp in pool), default=None),
+            "price_avg":        round(sum(sp.current_price for sp in pool) / len(pool), 2) if pool else None,
+            "price_currency":   priced[0].currency if priced else "MAD",
+            "sites_count":      len(site_products),
+            "in_stock_count":   sum(1 for sp in site_products if sp.in_stock),
+            "cheapest_site":    cheapest.site.domain if cheapest else None,
+            "cheapest_url":     cheapest.product_url if cheapest else None,
+            "sites":            [
+                SitePriceOut(
+                    site_id=sp.site_id,
+                    site_name=sp.site.name,
+                    site_domain=sp.site.domain,
+                    price=sp.current_price,
+                    currency=sp.currency,
+                    in_stock=sp.in_stock,
+                    product_url=sp.product_url,
+                    last_scraped_at=sp.last_scraped_at,
+                )
+                for sp in site_products
+            ],
+        })
+
+    return results
 
 
 # ---------------------------------------------------------------------------

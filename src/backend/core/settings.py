@@ -324,3 +324,14 @@ SCRAPER_REQUEST_TIMEOUT_SECONDS: int = int(
     os.getenv("SCRAPER_REQUEST_TIMEOUT_SECONDS", "30")
 )
 SCRAPER_MAX_RETRIES: int = int(os.getenv("SCRAPER_MAX_RETRIES", "3"))
+
+
+# ---------------------------------------------------------------------------
+# Admin bulk operations
+# ---------------------------------------------------------------------------
+
+# Raised when selecting thousands of checkboxes in Admin bulk actions.
+# Default is 1000 — increase for large catalogue operations.
+DATA_UPLOAD_MAX_NUMBER_FIELDS: int = int(
+    os.getenv("DATA_UPLOAD_MAX_NUMBER_FIELDS", "50000")
+)

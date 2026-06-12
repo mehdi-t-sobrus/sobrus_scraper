@@ -161,6 +161,12 @@ class SiteProduct(models.Model):
     raw_ean = models.CharField(max_length=14, blank=True, default="")
     raw_category = models.CharField(max_length=255, blank=True, default="")
     raw_description = models.TextField(blank=True, default="")
+    image_url = models.URLField(
+        max_length=2048,
+        blank=True,
+        default="",
+        help_text=_("Primary product image URL from this site."),
+    )
 
     # -- Current pricing snapshot (updated on each scrape) -------------------
     current_price = models.DecimalField(
@@ -189,6 +195,12 @@ class SiteProduct(models.Model):
         verbose_name = "Site Product"
         verbose_name_plural = "Site Products"
         ordering = ["site", "raw_name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["master_product", "site"],
+                name="unique_siteproduct_per_master_per_site",
+            )
+        ]
         indexes = [
             models.Index(fields=["site", "in_stock"], name="idx_site_product_stock"),
             models.Index(fields=["master_product", "site"], name="idx_site_product_master"),
@@ -217,19 +229,25 @@ class DailyPriceLog(models.Model):
 
     site_product = models.ForeignKey(
         SiteProduct,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="price_logs",
         db_index=True,
     )
     master_product = models.ForeignKey(
         MasterProduct,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="price_logs",
         db_index=True,
     )
     site = models.ForeignKey(
         "scraper_admin.SiteConfig",
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="price_logs",
         db_index=True,
     )

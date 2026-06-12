@@ -1,0 +1,18 @@
+# .dagster/dagster.yaml
+# Dagster instance configuration for local development.
+# Uses SQLite for event log storage — switch to PostgreSQL for production.
+
+storage:
+  sqlite:
+    base_dir: .dagster
+
+run_launcher:
+  module: dagster.core.launcher
+  class: DefaultRunLauncher
+
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: DefaultRunCoordinator
+
+telemetry:
+  enabled: false

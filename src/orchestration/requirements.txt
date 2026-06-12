@@ -1,0 +1,25 @@
+# =============================================================================
+# src/orchestration/requirements.txt
+# Dagster orchestration layer — separate venv from backend and transformations
+# =============================================================================
+
+# -- Dagster core
+dagster>=1.9,<2.0
+dagster-webserver>=1.9,<2.0     # Dagster UI
+
+# -- Dagster integrations
+dagster-dbt>=0.25,<1.0          # Native dbt asset support
+dagster-postgres>=0.25,<1.0     # Postgres event log storage (production)
+
+# -- dbt (same versions as transformations venv for subprocess compatibility)
+dbt-core>=1.8,<2.0
+dbt-duckdb>=1.9,<2.0
+
+# -- Django ORM access (for monitoring ScrapedURL status)
+Django>=5.1,<5.2
+psycopg[binary]>=3.1,<4.0
+
+# -- Utilities
+python-dotenv>=1.0,<2.0
+pandas>=2.2,<3.0
+requests>=2.32,<3.0

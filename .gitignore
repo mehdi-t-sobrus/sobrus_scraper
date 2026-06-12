@@ -65,6 +65,13 @@ src/backend/media/
 logs/
 
 # ---------------------------------------------------------------------------
+# Dagster instance storage — local SQLite run history
+# ---------------------------------------------------------------------------
+.dagster/storage/
+.dagster/*.db
+.dagster/schedules/
+
+# ---------------------------------------------------------------------------
 # ML models cache — large files, download automatically via HuggingFace
 # ---------------------------------------------------------------------------
 *.bin

@@ -51,7 +51,7 @@ services:
   # Hosts: Django-managed product catalog, price hypertables, scraper configs
   # ---------------------------------------------------------------------------
   db:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:latest-pg17
     container_name: pipeline_db
     <<: [*restart-policy, *default-logging]
     environment:
