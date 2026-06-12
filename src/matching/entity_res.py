@@ -526,10 +526,13 @@ def _match_one(row: pd.Series, idx: MasterIndex) -> MatchResult:
     if normalised and normalised in idx.name_index:
         candidate = idx.name_index[normalised]
         if candidate not in same_domain_masters:
-            return MatchResult(
-                master_id=candidate,
-                tier=3, confidence=1.0,
-            )
+            # Brand gate — skip if brands are known and don't match
+            candidate_brand = idx._master_brands.get(candidate, "")
+            if not normalised_brand or not candidate_brand or normalised_brand == candidate_brand:
+                return MatchResult(
+                    master_id=candidate,
+                    tier=3, confidence=1.0,
+                )
 
     # RapidFuzz best match against all normalised names
     if normalised and idx.all_names:
