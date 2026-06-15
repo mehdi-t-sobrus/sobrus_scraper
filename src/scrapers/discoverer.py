@@ -34,10 +34,8 @@ import asyncio
 import logging
 import os
 import random
-import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator
 from uuid import UUID
 
 from dotenv import load_dotenv

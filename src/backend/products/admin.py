@@ -7,8 +7,7 @@ Django Admin for the Gold product catalog.
 from __future__ import annotations
 
 from django.contrib import admin
-from django.db.models import Avg, Count, Max, Min, QuerySet
-from django.http import HttpRequest
+from django.db.models import Count, Max, Min
 from django.utils.html import format_html
 
 from .models import DailyPriceLog, MasterProduct, SiteProduct

@@ -692,6 +692,9 @@ async def _bulk_update_statuses(
         }
         db_status = status_map.get(record.status, "failed")
         await _update_url_status(ctx_session, record.scraped_url_id, db_status)
+
+
+async def _backoff(attempt: int, base: float = 2.0) -> None:
     """Full-jitter exponential back-off."""
     ceiling = base * (2 ** (attempt - 1))
     delay = random.uniform(0, ceiling)

@@ -36,7 +36,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from typing import AsyncIterator
 from xml.etree import ElementTree as ET
 

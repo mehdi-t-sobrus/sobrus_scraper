@@ -8,7 +8,7 @@ on:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Lint & type check
+  # Lint
   # ---------------------------------------------------------------------------
   lint:
     name: Lint
@@ -22,14 +22,14 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - name: Install lint dependencies
+      - name: Install ruff
         run: pip install ruff
 
       - name: Ruff lint
         run: ruff check src/ tests/
 
   # ---------------------------------------------------------------------------
-  # Tests — Silver extraction + entity resolution
+  # Tests
   # ---------------------------------------------------------------------------
   test:
     name: Tests
@@ -54,17 +54,20 @@ jobs:
         env:
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
           DJANGO_DEBUG: "True"
+          # Add transformations to path so test_silver_extraction.py can import models.silver.*
+          PYTHONPATH: src/backend:src:src/transformations
 
   # ---------------------------------------------------------------------------
-  # Django migrations check — ensures no missing migrations
-  # Uses timescaledb-ha which bundles pgvector (required for migration 0003)
+  # Django migrations check
+  # Uses timescale/timescaledb:latest-pg17 (available on Docker Hub)
+  # pgvector is enabled manually via psql before migrations run
   # ---------------------------------------------------------------------------
   migrations:
     name: Migrations Check
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: timescale/timescaledb-ha:pg17-latest
+        image: timescale/timescaledb:latest-pg17
         env:
           POSTGRES_DB: pipeline_gold
           POSTGRES_USER: pipeline_user
@@ -91,6 +94,9 @@ jobs:
           pip install -r src/backend/requirements.txt
           pip install -e .
 
+      - name: Install psql client
+        run: sudo apt-get install -y postgresql-client
+
       - name: Enable pgvector extension
         run: |
           PGPASSWORD=testpassword psql -h localhost -U pipeline_user -d pipeline_gold \
@@ -113,7 +119,7 @@ jobs:
           DATABASE_URL: postgresql://pipeline_user:testpassword@localhost:5432/pipeline_gold
 
   # ---------------------------------------------------------------------------
-  # Deploy to production (main branch only)
+  # Deploy (main branch only)
   # ---------------------------------------------------------------------------
   deploy:
     name: Deploy
@@ -132,8 +138,8 @@ jobs:
           script: |
             cd /opt/sobrus_scraper
             git pull origin main
-            docker compose pull
-            docker compose up -d --build
+            docker compose build
+            docker compose up -d
             docker compose exec backend python manage.py migrate --no-input
             docker compose exec backend python manage.py collectstatic --no-input
             echo "Deployment complete at $(date)"

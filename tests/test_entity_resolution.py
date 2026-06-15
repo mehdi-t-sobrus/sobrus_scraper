@@ -14,10 +14,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
 from uuid import uuid4
 
-import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -25,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "backend"))
 
 from matching.entity_res import (
     MasterIndex,
-    MatchResult,
     _brand_volume_fingerprint,
     _extract_volume,
     _normalise_name,
@@ -147,7 +144,7 @@ def _make_index(**kwargs) -> MasterIndex:
     return idx
 
 
-def _make_row(**kwargs) -> "pd.Series":
+def _make_row(**kwargs):
     import pandas as pd
     defaults = {
         "raw_name": "", "raw_brand": "", "raw_ean": "",

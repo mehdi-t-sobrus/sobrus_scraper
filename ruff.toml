@@ -1,0 +1,21 @@
+# ruff.toml
+# Ruff linting configuration for the pipeline project
+
+line-length = 120  # practical limit for a data pipeline codebase
+
+[lint]
+select = ["F", "E", "W"]
+ignore = [
+    # E402: module level import not at top — necessary in Django setup files
+    # and files that call django.setup() before importing models
+    "E402",
+    # E501: line too long — auto-generated migrations, long strings in scrapers,
+    # HTTP headers and comments should not be wrapped artificially
+    "E501",
+]
+
+[lint.per-file-ignores]
+# Migration files — auto-generated, never edit manually
+"**/migrations/**" = ["E501", "F401"]
+# Test files — allow some flexibility
+"tests/**" = ["F401", "E501"]

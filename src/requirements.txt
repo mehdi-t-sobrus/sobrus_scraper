@@ -37,3 +37,4 @@ duckdb>=1.0,<2.0                   # Silver Parquet queries + report generation
 # -- Testing
 pytest>=8.0,<10.0
 pytest-asyncio>=0.23,<2.0
+ruff>=0.15,<0.16

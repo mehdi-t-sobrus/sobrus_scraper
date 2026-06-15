@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 
 from ninja import NinjaAPI
-from ninja.security import django_auth, HttpBearer
+from ninja.security import HttpBearer
 
 from scraper_admin.api import router as scraper_router
 from products.api import router as products_router
@@ -62,8 +62,6 @@ api_key_auth = ApiKeyAuth()
 # ---------------------------------------------------------------------------
 # Combined auth — accepts either a valid Django session OR a valid API key
 # ---------------------------------------------------------------------------
-
-from ninja.security import django_auth_superuser  # noqa: E402 — after class def
 
 
 def any_auth(request):
@@ -103,3 +101,28 @@ api = NinjaAPI(
 
 api.add_router("/scrapers/", scraper_router, tags=["Scraper Admin"])
 api.add_router("/products/", products_router, tags=["Products"])
+
+
+# ---------------------------------------------------------------------------
+# Health check — public, no auth required (used by Docker healthchecks)
+# ---------------------------------------------------------------------------
+
+@api.get("/health/", auth=None, tags=["System"])
+def health_check(request):
+    """
+    Public health check endpoint.
+    Returns 200 if Django is running and the DB is reachable.
+    Used by Docker healthchecks and load balancers.
+    """
+    from django.db import connection
+    try:
+        connection.ensure_connection()
+        db_ok = True
+    except Exception:
+        db_ok = False
+
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "db": "ok" if db_ok else "error",
+        "version": "1.0.0",
+    }

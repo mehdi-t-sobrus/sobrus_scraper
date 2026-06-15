@@ -14,10 +14,9 @@ Per CLAUDE.md §1, the Admin is the primary command dashboard for:
 from __future__ import annotations
 
 from django.contrib import admin
-from django.db.models import Count, QuerySet
+from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.utils.html import format_html
-from django.utils.translation import gettext_lazy as _
 
 from .models import ProxyPool, ScrapeLog, ScrapedURL, SiteConfig
 

@@ -51,13 +51,12 @@ Running
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -76,9 +75,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
 import django
 django.setup()
 
-from asgiref.sync import sync_to_async
 from django.db import transaction
-from django.utils import timezone as dj_timezone
 
 from products.models import DailyPriceLog, MasterProduct, SiteProduct
 from scraper_admin.models import SiteConfig

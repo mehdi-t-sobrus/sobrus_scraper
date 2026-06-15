@@ -10,18 +10,17 @@ Unit tests for Gold layer logic:
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from unittest.mock import MagicMock
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "backend"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "transformations"))
 
-from matching.entity_res import _pick_best_image, _normalise_name
+from matching.entity_res import _pick_best_image
 
 
 # ---------------------------------------------------------------------------
