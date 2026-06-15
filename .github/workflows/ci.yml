@@ -43,15 +43,11 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - name: Install backend dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r src/backend/requirements.txt
           pip install -e .
-          pip install pytest pytest-asyncio
-
-      - name: Install selectolax for Silver tests
-        run: pip install selectolax
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
@@ -61,13 +57,14 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Django migrations check — ensures no missing migrations
+  # Uses timescaledb-ha which bundles pgvector (required for migration 0003)
   # ---------------------------------------------------------------------------
   migrations:
     name: Migrations Check
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: timescale/timescaledb:latest-pg17
+        image: timescale/timescaledb-ha:pg17-latest
         env:
           POSTGRES_DB: pipeline_gold
           POSTGRES_USER: pipeline_user
@@ -94,7 +91,20 @@ jobs:
           pip install -r src/backend/requirements.txt
           pip install -e .
 
-      - name: Check no missing migrations
+      - name: Enable pgvector extension
+        run: |
+          PGPASSWORD=testpassword psql -h localhost -U pipeline_user -d pipeline_gold \
+            -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+      - name: Run migrations
+        working-directory: src/backend
+        run: python manage.py migrate --no-input
+        env:
+          DJANGO_SECRET_KEY: ci-test-secret-key
+          DJANGO_DEBUG: "True"
+          DATABASE_URL: postgresql://pipeline_user:testpassword@localhost:5432/pipeline_gold
+
+      - name: Check no pending migrations
         working-directory: src/backend
         run: python manage.py migrate --check
         env:
