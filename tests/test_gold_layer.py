@@ -16,6 +16,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+_ROOT = Path(__file__).resolve().parent.parent
+for _p in [_ROOT / "src" / "backend", _ROOT / "src", _ROOT / "src" / "transformations"]:
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
 from matching.entity_res import _pick_best_image
 
 

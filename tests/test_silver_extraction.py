@@ -21,6 +21,16 @@ from pathlib import Path
 
 import pytest
 
+# Ensure src/transformations is on the path for models.silver imports
+_ROOT = Path(__file__).resolve().parent.parent
+for _p in [
+    _ROOT / "src" / "transformations",
+    _ROOT / "src" / "backend",
+    _ROOT / "src",
+]:
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
 from models.silver.silver_products import (
     _clean_description,
     _extract_json_ld,
