@@ -18,9 +18,6 @@ from uuid import uuid4
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "backend"))
-
 from matching.entity_res import (
     MasterIndex,
     _brand_volume_fingerprint,

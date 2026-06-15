@@ -21,10 +21,6 @@ from pathlib import Path
 
 import pytest
 
-# Add src paths so imports work without installing
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "transformations"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "backend"))
-
 from models.silver.silver_products import (
     _clean_description,
     _extract_json_ld,

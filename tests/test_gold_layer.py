@@ -16,10 +16,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "backend"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "transformations"))
-
 from matching.entity_res import _pick_best_image
 
 

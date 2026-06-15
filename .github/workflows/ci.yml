@@ -54,8 +54,6 @@ jobs:
         env:
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
           DJANGO_DEBUG: "True"
-          # Add transformations to path so test_silver_extraction.py can import models.silver.*
-          PYTHONPATH: src/backend:src:src/transformations
 
   # ---------------------------------------------------------------------------
   # Django migrations check
