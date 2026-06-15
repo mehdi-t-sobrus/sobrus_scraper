@@ -97,9 +97,17 @@ jobs:
       - name: Install psql client
         run: sudo apt-get install -y postgresql-client
 
-      - name: Enable pgvector extension
+      - name: Wait for PostgreSQL
         run: |
-          PGPASSWORD=testpassword psql -h localhost -U pipeline_user -d pipeline_gold \
+          until pg_isready -h localhost -p 5432 -U pipeline_user; do
+            sleep 1
+          done
+
+      - name: Enable pgvector extension
+        env:
+          PGPASSWORD: testpassword
+        run: |
+          psql -h localhost -p 5432 -U pipeline_user -d pipeline_gold \
             -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       - name: Run migrations
@@ -109,6 +117,7 @@ jobs:
           DJANGO_SECRET_KEY: ci-test-secret-key
           DJANGO_DEBUG: "True"
           DATABASE_URL: postgresql://pipeline_user:testpassword@localhost:5432/pipeline_gold
+          PGPASSWORD: testpassword
 
       - name: Check no pending migrations
         working-directory: src/backend
@@ -117,6 +126,7 @@ jobs:
           DJANGO_SECRET_KEY: ci-test-secret-key
           DJANGO_DEBUG: "True"
           DATABASE_URL: postgresql://pipeline_user:testpassword@localhost:5432/pipeline_gold
+          PGPASSWORD: testpassword
 
   # ---------------------------------------------------------------------------
   # Deploy (main branch only)
