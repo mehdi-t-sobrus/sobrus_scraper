@@ -96,18 +96,22 @@ DJANGO_API_KEY: str = os.getenv("DJANGO_API_KEY", "")
 
 
 # ===========================================================================
-# Proxy Pool  (reads live from Django ProxyPool via API on startup)
-# ===========================================================================
+# Proxy Pool  (reads live from Django ProxyPool API on startup)
+# Structure: {"global": [...endpoints...], "domain.ma": [...endpoints...]}
+# ---------------------------------------------------------------------------
 
-_PROXY_POOL: list[str] = []
+_PROXY_POOL: dict[str, list[str]] = {"global": []}
 
 
 async def _refresh_proxy_pool(session: AsyncSession) -> None:
     """
     Refresh the in-process proxy pool from the Django ProxyPool API.
 
-    Called once at worker startup and can be re-called on a schedule.
-    Falls back to PROXY_LIST env var if the API is unreachable.
+    Builds a domain-keyed dict:
+      - "global" → proxies with no site restriction (available to all sites)
+      - "domain.ma" → proxies restricted to that specific site
+
+    Falls back to PROXY_LIST / PROXY_ENDPOINT env vars if API unreachable.
     """
     global _PROXY_POOL
     try:
@@ -118,30 +122,68 @@ async def _refresh_proxy_pool(session: AsyncSession) -> None:
         )
         resp.raise_for_status()
         data = resp.json()
-        _PROXY_POOL = [p["endpoint"] for p in data if p.get("endpoint")]
-        logger.info("Proxy pool refreshed: %d endpoint(s) from Django API.", len(_PROXY_POOL))
+
+        pool: dict[str, list[str]] = {"global": []}
+        for p in data:
+            if not p.get("endpoint") or not p.get("is_active"):
+                continue
+            endpoint = p["endpoint"]
+            sites = p.get("sites", [])  # list of domain strings
+            if sites:
+                for domain in sites:
+                    pool.setdefault(domain, []).append(endpoint)
+            else:
+                pool["global"].append(endpoint)
+
+        _PROXY_POOL = pool
+        total = sum(len(v) for v in pool.values())
+        logger.info(
+            "Proxy pool refreshed: %d endpoint(s) (%d global, %d site-specific).",
+            total,
+            len(pool["global"]),
+            total - len(pool["global"]),
+        )
         return
     except Exception as exc:
         logger.warning("Could not refresh proxy pool from API: %s. Falling back to env.", exc)
 
-    # Fallback: PROXY_LIST env var
+    # Fallback: env vars
     raw = os.getenv("PROXY_LIST", "").strip()
     if raw:
-        _PROXY_POOL = [p.strip() for p in raw.split(",") if p.strip()]
-        logger.info("Proxy pool loaded from PROXY_LIST: %d endpoint(s).", len(_PROXY_POOL))
+        endpoints = [p.strip() for p in raw.split(",") if p.strip()]
+        _PROXY_POOL = {"global": endpoints}
+        logger.info("Proxy pool loaded from PROXY_LIST: %d endpoint(s).", len(endpoints))
     else:
         single = os.getenv("PROXY_ENDPOINT", "").strip()
-        _PROXY_POOL = [single] if single else []
-        logger.warning("No proxy configuration found. Requests will use host IP.")
+        _PROXY_POOL = {"global": [single] if single else []}
+        if not single:
+            logger.warning("No proxy configuration found. Requests will use host IP.")
 
 
 def _pick_proxy(domain: str) -> str | None:
-    """Uniform random proxy selection. See CLAUDE.md §4."""
-    if not _PROXY_POOL:
-        return None
-    chosen = random.choice(_PROXY_POOL)
-    logger.debug("Proxy for %s → %s", domain, _obfuscate_proxy(chosen))
-    return chosen
+    """
+    Select a proxy for the given domain.
+
+    Priority:
+    1. Site-specific proxies for this domain
+    2. Global proxies (no site restriction)
+    3. None → use host IP
+    """
+    # Try site-specific first
+    site_proxies = _PROXY_POOL.get(domain, [])
+    if site_proxies:
+        chosen = random.choice(site_proxies)
+        logger.debug("Proxy for %s → %s (site-specific)", domain, _obfuscate_proxy(chosen))
+        return chosen
+
+    # Fall back to global pool
+    global_proxies = _PROXY_POOL.get("global", [])
+    if global_proxies:
+        chosen = random.choice(global_proxies)
+        logger.debug("Proxy for %s → %s (global)", domain, _obfuscate_proxy(chosen))
+        return chosen
+
+    return None
 
 
 def _obfuscate_proxy(proxy: str) -> str:

@@ -1,0 +1,147 @@
+# =============================================================================
+# docker-compose.dev.yml — Development (standalone, not extending prod)
+# =============================================================================
+# Uses your existing local TimescaleDB — no db service here.
+# All containers connect to host.docker.internal:5432
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml logs -f
+#   docker compose -f docker-compose.dev.yml down
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Redis — Arq job queue
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --loglevel warning
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Backend — Django API + Admin
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: runtime
+    restart: unless-stopped
+    entrypoint: ["/entrypoint.backend.sh"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: .env
+    environment:
+      DJANGO_DEBUG:         "True"
+      DJANGO_ALLOWED_HOSTS: "*"
+      GUNICORN_WORKERS:     "2"
+    volumes:
+      - ./src:/app/src
+      - ./pyproject.toml:/app/pyproject.toml
+      - bronze_data:/app/data/bronze
+      - silver_data:/app/data/silver
+      - static_files:/app/staticfiles
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/v1/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Arq Worker — same image as backend
+  # ---------------------------------------------------------------------------
+  arq_worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: runtime
+    restart: unless-stopped
+    entrypoint: ["/entrypoint.worker.sh"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: .env
+    environment:
+      DJANGO_API_BASE: http://backend:8000/api/v1
+    volumes:
+      - ./src:/app/src
+      - ./pyproject.toml:/app/pyproject.toml
+      - bronze_data:/app/data/bronze
+      - hf_cache:/home/pipeline/.cache/huggingface
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Dagster Webserver — pipeline UI (port 3000)
+  # ---------------------------------------------------------------------------
+  dagster_web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dagster
+      target: runtime
+    restart: unless-stopped
+    entrypoint: ["/entrypoint.dagster_web.sh"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./.dagster:/app/.dagster
+      - silver_data:/app/data/silver
+      - bronze_data:/app/data/bronze
+      - hf_cache:/home/pipeline/.cache/huggingface
+    ports:
+      - "3000:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Dagster Daemon — schedules + sensors
+  # ---------------------------------------------------------------------------
+  dagster_daemon:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dagster
+      target: runtime
+    restart: unless-stopped
+    entrypoint: ["/entrypoint.dagster_daemon.sh"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./.dagster:/app/.dagster
+      - silver_data:/app/data/silver
+      - bronze_data:/app/data/bronze
+      - hf_cache:/home/pipeline/.cache/huggingface
+    depends_on:
+      dagster_web:
+        condition: service_started
+
+# ---------------------------------------------------------------------------
+# Named volumes
+# ---------------------------------------------------------------------------
+volumes:
+  bronze_data:
+  silver_data:
+  dagster_storage:
+  hf_cache:
+  static_files:

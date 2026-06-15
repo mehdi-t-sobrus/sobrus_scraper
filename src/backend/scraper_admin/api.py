@@ -45,10 +45,12 @@ class SiteConfigOut(Schema):
 
 class ProxyOut(Schema):
     id: UUID
-    endpoint: str          # workers need the full DSN; keep this endpoint internal
+    endpoint: str          # workers need the full DSN; keep this internal
     proxy_type: str
     country_code: str
     provider: str
+    is_active: bool
+    sites: list[str]       # list of domain strings — empty = global proxy
 
 
 class ScrapedURLOut(Schema):
@@ -133,11 +135,23 @@ async def get_site(request, site_id: UUID) -> SiteConfig:
 @router.get("/proxies/", response=list[ProxyOut], summary="List active proxies")
 async def list_active_proxies(request) -> list[dict[str, Any]]:
     """
-    Return all active proxy endpoints.
+    Return all active proxy endpoints with their site restrictions.
     Arq workers call this to hydrate their in-process proxy pool.
+    Empty sites list = global proxy available to all sites.
     """
-    qs = ProxyPool.objects.filter(is_active=True).order_by("?")  # random order
-    return [ProxyOut.from_orm(p).dict() async for p in qs]
+    proxies = []
+    async for p in ProxyPool.objects.filter(is_active=True).prefetch_related("sites"):
+        site_domains = [s.domain async for s in p.sites.all()]
+        proxies.append({
+            "id": p.id,
+            "endpoint": p.endpoint,
+            "proxy_type": p.proxy_type,
+            "country_code": p.country_code,
+            "provider": p.provider,
+            "is_active": p.is_active,
+            "sites": site_domains,
+        })
+    return proxies
 
 
 # ---------------------------------------------------------------------------

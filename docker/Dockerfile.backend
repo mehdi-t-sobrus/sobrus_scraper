@@ -1,0 +1,81 @@
+# =============================================================================
+# docker/Dockerfile.backend
+# =============================================================================
+# Single image used by:
+#   - backend    (Django + Gunicorn)
+#   - arq_worker (Arq scraping worker)
+#   - dagster_web / dagster_daemon (via Dockerfile.dagster which extends this)
+#
+# Build stages:
+#   builder  — installs Python deps with pip
+#   runtime  — lean final image without build tools
+# =============================================================================
+
+ARG PYTHON_VERSION=3.13
+FROM python:${PYTHON_VERSION}-slim AS builder
+
+# System deps for building Python packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy only requirements first for better layer caching
+COPY src/backend/requirements.txt ./requirements.txt
+
+# Install all Python dependencies into /install
+RUN pip install --upgrade pip && \
+    pip install --prefix=/install --no-cache-dir -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# Runtime stage — lean image
+# ---------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+# Runtime system deps only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
+
+# Create non-root user
+RUN groupadd --gid 1000 pipeline && \
+    useradd --uid 1000 --gid pipeline --shell /bin/bash --create-home pipeline
+
+WORKDIR /app
+
+# Copy source code
+COPY pyproject.toml ./
+COPY src/ ./src/
+
+# Install the project in editable mode so all packages are importable
+RUN pip install --no-cache-dir -e .
+
+# Create data directories
+RUN mkdir -p /app/data/bronze /app/data/silver /app/data/.r2_cache && \
+    chown -R pipeline:pipeline /app/data
+
+# Copy entrypoint scripts
+COPY docker/entrypoint.backend.sh /entrypoint.backend.sh
+COPY docker/entrypoint.worker.sh  /entrypoint.worker.sh
+RUN chmod +x /entrypoint.backend.sh /entrypoint.worker.sh
+
+USER pipeline
+
+# Default environment
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DJANGO_SETTINGS_MODULE=core.settings \
+    PYTHONPATH=/app/src/backend:/app/src
+
+EXPOSE 8000
+
+ENTRYPOINT ["/entrypoint.backend.sh"]

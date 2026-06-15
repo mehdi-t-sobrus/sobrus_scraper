@@ -911,6 +911,123 @@ def _store_embeddings(masters_to_embed: list[tuple[UUID, str]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# R2 Silver reader
+# ---------------------------------------------------------------------------
+
+def _download_silver_from_r2(
+    site_domain: str | None,
+    target_date: str | None,
+    local_cache_dir: Path,
+) -> Path:
+    """
+    Download Silver Parquet files from Cloudflare R2 to a local cache directory.
+
+    R2 path structure mirrors the local dev structure:
+        s3://<bucket>/silver/products/domain=<domain>/fetched_date=<date>/<uuid>.parquet
+
+    Files are cached locally and only re-downloaded if the R2 object is newer
+    than the local copy (via ETag comparison).
+
+    Parameters
+    ----------
+    site_domain:
+        If provided, only download files for this domain.
+    target_date:
+        If provided, only download files for this date (YYYY-MM-DD).
+    local_cache_dir:
+        Local directory to cache downloaded Parquet files.
+
+    Returns
+    -------
+    Path
+        Path to the local cache directory (mirrors R2 structure).
+    """
+    import boto3
+    from botocore.exceptions import ClientError, NoCredentialsError
+
+    bucket    = os.getenv("R2_SILVER_BUCKET", "pipeline-silver")
+    endpoint  = os.getenv("R2_ENDPOINT_URL", "")
+    access_key = os.getenv("R2_ACCESS_KEY_ID", "")
+    secret_key = os.getenv("R2_SECRET_ACCESS_KEY", "")
+
+    if not all([endpoint, access_key, secret_key]):
+        raise EnvironmentError(
+            "R2 credentials not configured. Set R2_ENDPOINT_URL, "
+            "R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY in matching/.env — "
+            "or set R2_LOCAL_DEV_MODE=True to use local data/silver/ instead."
+        )
+
+    try:
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to create R2 client: {exc}") from exc
+
+    # Build S3 prefix to list
+    prefix = "silver/products/"
+    if site_domain:
+        prefix += f"domain={site_domain}/"
+    if target_date:
+        prefix += f"fetched_date={target_date}/"
+
+    logger.info("Listing R2 Silver objects: s3://%s/%s", bucket, prefix)
+
+    downloaded = 0
+    skipped = 0
+
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if not key.endswith(".parquet"):
+                    continue
+
+                # Mirror R2 path to local cache
+                # key = "silver/products/domain=x.ma/fetched_date=2026-06-10/file.parquet"
+                relative = key.removeprefix("silver/products/")
+                local_path = local_cache_dir / relative
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Skip if local file exists with matching ETag (already fresh)
+                if local_path.exists():
+                    local_etag = _file_etag(local_path)
+                    remote_etag = obj.get("ETag", "").strip('"')
+                    if local_etag == remote_etag:
+                        skipped += 1
+                        continue
+
+                # Download
+                logger.debug("Downloading s3://%s/%s → %s", bucket, key, local_path)
+                s3.download_file(bucket, key, str(local_path))
+                downloaded += 1
+
+    except (ClientError, NoCredentialsError) as exc:
+        raise RuntimeError(f"R2 download failed: {exc}") from exc
+
+    logger.info(
+        "R2 Silver sync complete: %d downloaded, %d already cached.",
+        downloaded, skipped,
+    )
+
+    return local_cache_dir
+
+
+def _file_etag(path: Path) -> str:
+    """Compute MD5 hex digest of a file — matches S3/R2 ETag for single-part uploads."""
+    import hashlib
+    md5 = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            md5.update(chunk)
+    return md5.hexdigest()
+
+
+# ---------------------------------------------------------------------------
 # Main matching runner
 # ---------------------------------------------------------------------------
 
@@ -949,9 +1066,11 @@ def run_matching(
     if local_dev:
         silver_root = project_root / "data" / "silver" / "products"
     else:
-        raise NotImplementedError(
-            "R2 Silver reading not yet implemented. "
-            "Set R2_LOCAL_DEV_MODE=True for local dev."
+        # Production — download Parquet files from Cloudflare R2
+        silver_root = _download_silver_from_r2(
+            site_domain=site_domain,
+            target_date=target_date,
+            local_cache_dir=project_root / "data" / ".r2_cache" / "silver",
         )
 
     # ------------------------------------------------------------------

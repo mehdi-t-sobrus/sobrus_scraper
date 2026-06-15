@@ -11,3 +11,7 @@ requires-python = ">=3.13"
 [tool.setuptools.packages.find]
 where = ["src/backend", "src"]
 include = ["core*", "scraper_admin*", "products*", "scrapers*", "matching*", "orchestration*"]
+
+[tool.dagster]
+module_name = "orchestration.definitions"
+working_directory = "/app"

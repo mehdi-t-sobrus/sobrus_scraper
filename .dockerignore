@@ -1,0 +1,53 @@
+# Virtual environments — never copy into image
+**/.venv
+**/venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# Local data — mounted as volumes in production
+data/
+
+# Dagster local storage
+.dagster/storage/
+.dagster/*.db
+.dagster/schedules/
+
+# Git
+.git
+.gitignore
+
+# Dev files
+*.md
+.env
+**/.env
+!**/.env.example
+
+# dbt build artifacts
+src/transformations/target/
+src/transformations/dbt_packages/
+src/transformations/logs/
+src/transformations/dev.duckdb
+
+# Django
+src/backend/staticfiles/
+src/backend/media/
+
+# ML model cache — downloaded at runtime, not baked into image
+**/.cache/huggingface/
+
+# OS
+.DS_Store
+**/.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Tests (not needed in prod image)
+tests/
+pytest.ini
+*.test.py
+
+# CI
+.github/

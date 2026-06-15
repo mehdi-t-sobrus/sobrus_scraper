@@ -234,17 +234,48 @@ PLUGIN_REGISTRY: dict[str, tuple[type[BaseDiscoveryPlugin], dict]] = {
 # R2 / Proxy helpers
 # ===========================================================================
 
-async def _pick_random_proxy() -> str | None:
-    """Return a random active proxy DSN from the Django ProxyPool, or None."""
-    proxies = await sync_to_async(
+async def _pick_random_proxy(domain: str | None = None) -> str | None:
+    """
+    Return a random active proxy DSN from the Django ProxyPool.
+
+    Selection priority:
+    1. Site-specific proxies (linked to the given domain via M2M)
+    2. Global proxies (no site restriction)
+    3. None (host IP) if no active proxies found
+
+    Parameters
+    ----------
+    domain:
+        The site domain being scraped. Used to prefer site-specific proxies.
+    """
+    # Try site-specific proxies first
+    if domain:
+        site_proxies = await sync_to_async(
+            lambda: list(
+                ProxyPool.objects.filter(
+                    is_active=True,
+                    sites__domain=domain,
+                ).values_list("endpoint", flat=True)
+            )
+        )()
+        if site_proxies:
+            logger.debug("Using site-specific proxy for %s.", domain)
+            return random.choice(site_proxies)
+
+    # Fall back to global proxies (no site restriction)
+    global_proxies = await sync_to_async(
         lambda: list(
-            ProxyPool.objects.filter(is_active=True).values_list("endpoint", flat=True)
+            ProxyPool.objects.filter(
+                is_active=True,
+                sites__isnull=True,
+            ).values_list("endpoint", flat=True)
         )
     )()
-    if not proxies:
-        logger.warning("No active proxies in ProxyPool.  Discovery will use host IP.")
-        return None
-    return random.choice(proxies)
+    if global_proxies:
+        return random.choice(global_proxies)
+
+    logger.warning("No active proxies in ProxyPool. Discovery will use host IP.")
+    return None
 
 
 # ===========================================================================
@@ -468,7 +499,7 @@ async def _discover_site(
         }
 
     plugin_class, extra_config = plugin_entry
-    proxy = await _pick_random_proxy()
+    proxy = await _pick_random_proxy(domain=site.domain)
 
     ctx = DiscoveryContext(
         site_id=site.id,

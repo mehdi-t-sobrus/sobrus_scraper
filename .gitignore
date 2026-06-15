@@ -72,8 +72,9 @@ logs/
 .dagster/schedules/
 
 # ---------------------------------------------------------------------------
-# ML models cache — large files, download automatically via HuggingFace
+# Generated reports
 # ---------------------------------------------------------------------------
+sql/reports/
 *.bin
 *.safetensors
 models/

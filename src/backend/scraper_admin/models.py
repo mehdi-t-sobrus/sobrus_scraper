@@ -192,6 +192,18 @@ class ProxyPool(models.Model):
         help_text=_("Uncheck to immediately remove from worker rotation."),
     )
 
+    # Optional site restriction — if set, proxy is only used for these sites.
+    # If empty, proxy is available to all sites (global pool).
+    sites = models.ManyToManyField(
+        "SiteConfig",
+        blank=True,
+        related_name="proxies",
+        help_text=_(
+            "Restrict this proxy to specific sites. "
+            "Leave empty to make it available to all sites."
+        ),
+    )
+
     # -- Health tracking (updated by a periodic Arq health-check job) --------
     last_success_at = models.DateTimeField(null=True, blank=True)
     last_failure_at = models.DateTimeField(null=True, blank=True)

@@ -131,6 +131,7 @@ class ProxyPoolAdmin(admin.ModelAdmin):
         "provider",
         "proxy_type",
         "country_code",
+        "scope_display",
         "is_active",
         "consecutive_failures",
         "last_success_at",
@@ -146,15 +147,40 @@ class ProxyPoolAdmin(admin.ModelAdmin):
         "created_at",
         "updated_at",
     ]
+    filter_horizontal = ["sites"]
     ordering = ["-is_active", "provider"]
+
+    @admin.display(description="Scope")
+    def scope_display(self, obj: ProxyPool) -> str:
+        from django.utils.html import format_html
+        sites = list(obj.sites.values_list("domain", flat=True))
+        if not sites:
+            return format_html(
+                '<span style="color:#2ecc71;">🌐 Global</span>'
+            )
+        return format_html(
+            '<span style="color:#185FA5;">🔒 {}</span>',
+            ", ".join(sites),
+        )
 
     # Hide raw endpoint in list — credentials visible only in detail view
     fieldsets = (
         (
             "Endpoint",
             {
-                "description": "Credentials are stored encrypted at rest via DB-level encryption.",
+                "description": "Store the full DSN: http://user:password@host:port",
                 "fields": ("id", "endpoint", "proxy_type", "provider", "country_code", "is_active"),
+            },
+        ),
+        (
+            "Site Restrictions",
+            {
+                "description": (
+                    "Leave empty to make this proxy available to ALL sites (global pool). "
+                    "Select specific sites to restrict this proxy to those sites only — "
+                    "useful for residential proxies targeting bot-protected sites."
+                ),
+                "fields": ("sites",),
             },
         ),
         (
