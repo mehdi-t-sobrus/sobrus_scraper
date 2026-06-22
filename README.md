@@ -2,6 +2,8 @@
 
 A production-grade web scraping and price comparison system that tracks products across Moroccan parapharmacy and e-commerce websites. The platform automatically discovers products, scrapes prices, normalises data, and resolves product identities across sites to answer: **"Where is this product cheapest right now?"**
 
+> 📋 **For the complete command reference** (every task, every command, organised as a runbook), see **[WORKFLOW.md](WORKFLOW.md)**.
+
 ## Architecture Overview
 
 ```

@@ -7,7 +7,8 @@ Django Admin for the Gold product catalog.
 from __future__ import annotations
 
 from django.contrib import admin
-from django.db.models import Count, Max, Min
+from django.db import models
+from django.db.models import Avg, Count, Max, Min
 from django.utils.html import format_html
 
 from .models import DailyPriceLog, MasterProduct, SiteProduct
@@ -36,6 +37,7 @@ class SiteProductInline(admin.TabularInline):
     fields = readonly_fields
     show_change_link = False
     can_delete = False
+    verbose_name_plural = "🛒 Retail Listings (E-commerce)"
 
     @admin.display(description="Image")
     def image_thumb(self, obj: SiteProduct) -> str:
@@ -53,6 +55,22 @@ class SiteProductInline(admin.TabularInline):
             '<a href="{}" target="_blank" style="white-space:nowrap;">🔗 View on site</a>',
             obj.product_url,
         )
+
+
+class GrossisteProductInline(admin.TabularInline):
+    """Shows wholesale prices from all grossistes on the MasterProduct detail page."""
+    from grossiste.models import GrossisteProduct as model
+
+    extra            = 0
+    readonly_fields  = [
+        "grossiste", "code", "name",
+        "prix_pharmacien", "ppm", "in_stock",
+        "match_confidence", "manually_verified",
+    ]
+    fields           = readonly_fields
+    show_change_link = True
+    can_delete       = False
+    verbose_name_plural = "🏭 Wholesale Prices (Grossistes)"
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +120,82 @@ class SiteCountFilter(admin.SimpleListFilter):
         return queryset
 
 
+class HasWholesaleFilter(admin.SimpleListFilter):
+    title = "Wholesale Data"
+    parameter_name = "wholesale"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("yes", "🏭 Has wholesale price"),
+            ("no",  "❌ No wholesale data"),
+        ]
+
+    def queryset(self, request, queryset):
+        from grossiste.models import GrossisteProduct
+        matched_ids = (
+            GrossisteProduct.objects
+            .filter(master_product__isnull=False, prix_pharmacien__isnull=False)
+            .values_list("master_product_id", flat=True)
+            .distinct()
+        )
+        if self.value() == "yes":
+            return queryset.filter(id__in=matched_ids)
+        if self.value() == "no":
+            return queryset.exclude(id__in=matched_ids)
+        return queryset
+
+
+class RetailBelowWholesaleFilter(admin.SimpleListFilter):
+    title = "Margin Alert"
+    parameter_name = "margin_alert"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("below", "🚨 Retail min ≤ wholesale cost"),
+            ("ok",    "✅ Healthy margin"),
+        ]
+
+    def queryset(self, request, queryset):
+        from django.db.models import OuterRef, Subquery
+        from grossiste.models import GrossisteProduct
+
+        # Subquery: cheapest wholesale price for each master product
+        cheapest_wholesale = (
+            GrossisteProduct.objects
+            .filter(master_product=OuterRef("pk"), prix_pharmacien__isnull=False)
+            .order_by("prix_pharmacien")
+            .values("prix_pharmacien")[:1]
+        )
+
+        # Annotate queryset with cheapest wholesale and cheapest retail
+        from products.models import SiteProduct
+        cheapest_retail = (
+            SiteProduct.objects
+            .filter(master_product=OuterRef("pk"), current_price__isnull=False)
+            .order_by("current_price")
+            .values("current_price")[:1]
+        )
+
+        annotated = queryset.annotate(
+            _w_min=Subquery(cheapest_wholesale),
+            _r_min=Subquery(cheapest_retail),
+        )
+
+        if self.value() == "below":
+            return annotated.filter(
+                _w_min__isnull=False,
+                _r_min__isnull=False,
+                _r_min__lte=models.F("_w_min"),
+            )
+        if self.value() == "ok":
+            return annotated.filter(
+                _w_min__isnull=False,
+                _r_min__isnull=False,
+                _r_min__gt=models.F("_w_min"),
+            )
+        return queryset
+
+
 # ---------------------------------------------------------------------------
 # MasterProduct Admin
 # ---------------------------------------------------------------------------
@@ -118,6 +212,7 @@ class MasterProductAdmin(admin.ModelAdmin):
         "site_count",
         "price_range",
         "cheapest_site",
+        "wholesale_range",
         "last_matched_at",
     ]
     list_display_links = ["primary_image", "name"]   # both image and name are clickable
@@ -125,15 +220,17 @@ class MasterProductAdmin(admin.ModelAdmin):
         "status",
         SiteCountFilter,
         MatchConfidenceFilter,
+        HasWholesaleFilter,
+        RetailBelowWholesaleFilter,
         "manually_verified",
     ]
     search_fields = ["name", "brand", "ean", "mpn"]
     readonly_fields = [
         "id", "first_seen_at", "last_matched_at", "updated_at",
-        "price_comparison_panel",
+        "price_comparison_panel", "wholesale_panel",
     ]
     ordering = ["brand", "name"]
-    inlines = [SiteProductInline]
+    inlines = [SiteProductInline, GrossisteProductInline]
     list_per_page = 50
     list_select_related = False
 
@@ -149,10 +246,17 @@ class MasterProductAdmin(admin.ModelAdmin):
             {"fields": ("id", "name", "brand", "ean", "mpn", "status")},
         ),
         (
-            "💰 Price Comparison",
+            "💰 Price Comparison (Retail)",
             {
                 "fields": ("price_comparison_panel",),
-                "description": "Current prices across all sites. Sorted cheapest first.",
+                "description": "Current retail prices across e-commerce sites. Sorted cheapest first.",
+            },
+        ),
+        (
+            "🏭 Wholesale Prices (Grossistes)",
+            {
+                "fields": ("wholesale_panel",),
+                "description": "Buy prices from grossiste distributors. Independent from retail.",
             },
         ),
         (
@@ -237,13 +341,57 @@ class MasterProductAdmin(admin.ModelAdmin):
         if p_min is None:
             return "—"
         if p_min == p_max:
-            return format_html("<b>{}</b> MAD", f"{p_min:.0f}")
-        saving_pct = round((1 - p_min / p_max) * 100)
+            return format_html("<b>{}</b> MAD", f"{float(p_min):.0f}")
+        saving_pct = round((1 - float(p_min) / float(p_max)) * 100)
         return format_html(
             '<span style="color:#2ecc71;font-weight:bold;">{}</span>'
             ' → <span style="color:#e74c3c">{}</span>'
             ' <span style="color:#888;font-size:0.85em;">(-{}%)</span>',
-            f"{p_min:.0f}", f"{p_max:.0f}", saving_pct,
+            f"{float(p_min):.0f}", f"{float(p_max):.0f}", saving_pct,
+        )
+
+    @admin.display(description="Wholesale (MAD)")
+    def wholesale_range(self, obj: MasterProduct) -> str:
+        """
+        Min/max buy price across all grossistes.
+        Highlighted red when wholesale min >= retail min (selling below cost).
+        """
+        from grossiste.models import GrossisteProduct
+        stats = (
+            GrossisteProduct.objects
+            .filter(master_product=obj, prix_pharmacien__isnull=False)
+            .aggregate(
+                w_min=Min("prix_pharmacien"),
+                w_max=Max("prix_pharmacien"),
+                w_count=Count("grossiste", distinct=True),
+            )
+        )
+        if stats["w_min"] is None:
+            return "—"
+
+        w_min = float(stats["w_min"])
+        w_max = float(stats["w_max"])
+
+        # Check if retail min is at or below wholesale — alert condition
+        r_min = obj.site_products.filter(
+            current_price__isnull=False
+        ).aggregate(m=Min("current_price"))["m"]
+
+        below_cost = r_min is not None and float(r_min) <= w_min
+        colour = "#e74c3c" if below_cost else "#0EA5E9"
+
+        if stats["w_count"] == 1 or w_min == w_max:
+            return format_html(
+                '<span style="color:{};font-weight:bold;">{}</span>',
+                colour, f"{w_min:.2f}",
+            )
+        return format_html(
+            '<span style="color:{};font-weight:bold;">{}</span>'
+            ' – <span style="color:{};">{}</span>'
+            ' <span style="color:#888;font-size:0.85em;">({} src)</span>',
+            colour, f"{w_min:.2f}",
+            colour, f"{w_max:.2f}",
+            stats["w_count"],
         )
 
     @admin.display(description="Cheapest Site")
@@ -271,6 +419,81 @@ class MasterProductAdmin(admin.ModelAdmin):
         )
 
     # -- Detail page panel ---------------------------------------------------
+
+    @admin.display(description="Wholesale Prices")
+    def wholesale_panel(self, obj: MasterProduct) -> str:
+        """
+        Shows buy prices from all grossistes for this product.
+        Strictly wholesale-only — never mixed with retail prices.
+        """
+        from grossiste.models import GrossisteProduct
+        gps = list(
+            GrossisteProduct.objects
+            .filter(master_product=obj, prix_pharmacien__isnull=False)
+            .select_related("grossiste")
+            .order_by("prix_pharmacien")
+        )
+        if not gps:
+            return format_html(
+                '<p style="color:#999;padding:8px 0;">'
+                'No wholesale data — run: python manage.py sync_grossiste --name GPM --match</p>'
+            )
+
+        w_min = float(gps[0].prix_pharmacien)
+        w_max = float(gps[-1].prix_pharmacien)
+        n_grossistes = len(set(gp.grossiste_id for gp in gps))
+
+        # Summary
+        summary = format_html(
+            '<div style="display:flex;gap:24px;padding:12px 0;margin-bottom:12px;'
+            'border-bottom:1px solid #eee;">'
+            '<span>🟢 <b>Cheapest:</b> {} MAD</span>'
+            '<span>🔴 <b>Most expensive:</b> {} MAD</span>'
+            '<span>🏭 <b>Sources:</b> {} grossiste(s)</span>'
+            '</div>',
+            f"{w_min:.2f}", f"{w_max:.2f}", n_grossistes,
+        )
+
+        rows = []
+        for i, gp in enumerate(gps):
+            is_best = (i == 0)
+            rows.append(format_html(
+                '<tr style="background:{};">'
+                '<td style="padding:8px;">{}{}</td>'
+                '<td style="padding:8px;font-weight:bold;color:{};">{} MAD</td>'
+                '<td style="padding:8px;color:#888;">{}</td>'
+                '<td style="padding:8px;">{}</td>'
+                '</tr>',
+                "#f0fff4" if is_best else "#fff",
+                "🏆 " if is_best else "",
+                gp.grossiste.name,
+                "#2ecc71" if is_best else "#333",
+                f"{float(gp.prix_pharmacien):.2f}",
+                f"PPM: {float(gp.ppm):.2f} MAD" if gp.ppm else "—",
+                format_html(
+                    '<span style="color:#2ecc71;">✓ In Stock</span>'
+                ) if gp.in_stock else
+                format_html(
+                    '<span style="color:#e74c3c;">✗ Out of Stock</span>'
+                ) if gp.in_stock is False else
+                format_html('<span style="color:#888;">? Not checked</span>'),
+            ))
+
+        table = format_html(
+            '<table style="width:100%;border-collapse:collapse;font-size:0.95em;">'
+            '<thead><tr style="background:#f8f9fa;">'
+            '<th style="padding:8px;text-align:left;">Grossiste</th>'
+            '<th style="padding:8px;text-align:left;">Buy Price</th>'
+            '<th style="padding:8px;text-align:left;">PPM</th>'
+            '<th style="padding:8px;text-align:left;">Stock</th>'
+            '</tr></thead><tbody>{}</tbody></table>',
+            format_html("".join(str(r) for r in rows)),
+        )
+
+        return format_html(
+            '<div style="font-family:inherit;">{}{}</div>',
+            summary, table,
+        )
 
     @admin.display(description="Price Comparison")
     def price_comparison_panel(self, obj: MasterProduct) -> str:

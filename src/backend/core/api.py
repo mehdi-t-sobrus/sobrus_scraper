@@ -30,6 +30,7 @@ from ninja.security import HttpBearer
 
 from scraper_admin.api import router as scraper_router
 from products.api import router as products_router
+from grossiste.api import router as grossiste_router
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +102,7 @@ api = NinjaAPI(
 
 api.add_router("/scrapers/", scraper_router, tags=["Scraper Admin"])
 api.add_router("/products/", products_router, tags=["Products"])
+api.add_router("/grossiste/", grossiste_router, tags=["Grossiste"])
 
 
 # ---------------------------------------------------------------------------
