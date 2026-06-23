@@ -1,71 +1,69 @@
 """
 src/backend/grossiste/client.py
 ================================
-HTTP client for grossiste distributor APIs.
+Client for the Sobrus Pharma API (api.pharma.sobrus.com).
 
-All 3 distributors share the same API structure:
-  POST  /login           → session cookie
-  GET   /GetProd         → full product list (JavaScript var products = [...])
-  GET   /GetProd/{code}  → single product availability (in_stock boolean)
-  POST  /order           → place order (SKELETON — endpoint TBD)
+All grossiste operations (availability checks, orders) go through Sobrus —
+we never call the grossiste directly. The user's Sobrus session cookie is
+passed through per-request and never stored.
+
+Endpoints used:
+  POST /purchaseorders/check-availability?supplier_id=X&products=Y
+  POST /purchaseorders/          (order placement — TBD, to confirm)
 
 Usage:
-    from grossiste.client import GrossisteClient
-    from grossiste.models import GrossisteConfig
+    from grossiste.client import SobrusClient, SobrusAPIError
 
-    config = GrossisteConfig.objects.get(name="GPM")
-    async with GrossisteClient(config) as client:
-        await client.login()
-        products = await client.fetch_product_list()
-        is_available = await client.check_availability("5230")
-        order = await client.place_order("5230", quantity=10)
+    async with SobrusClient(sobrus_cookie) as client:
+        result = await client.check_availability(
+            supplier_id=1,         # config.sobrus_supplier_id
+            sobrus_product_id=148194  # product.sobrus_product_id
+        )
+        # result = {"supplierId": 1, "isAvailable": True}
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any
 
 from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger(__name__)
 
-
-class GrossisteAuthError(Exception):
-    """Raised when login fails."""
+SOBRUS_API_BASE = "https://api.pharma.sobrus.com"
 
 
-class GrossisteAPIError(Exception):
-    """Raised when an API call returns an unexpected response."""
+class SobrusAPIError(Exception):
+    """Raised when the Sobrus API returns an unexpected response."""
 
 
-class GrossisteClient:
+class SobrusAuthError(SobrusAPIError):
+    """Raised when the Sobrus session cookie is invalid or expired."""
+
+
+class SobrusClient:
     """
-    Async HTTP client for one grossiste distributor.
+    Async HTTP client that proxies requests to api.pharma.sobrus.com.
 
-    Credentials are passed per-call from the external ERP system —
-    they are NEVER stored in the database or on disk.
+    The Sobrus session cookie is passed per-request from the frontend —
+    it is never stored in the database.
 
     Parameters
     ----------
-    config:
-        GrossisteConfig — domain + API paths only.
-    username:
-        Grossiste login username (from ERP request payload).
-    password:
-        Grossiste login password (from ERP request payload).
+    sobrus_cookie:
+        The full cookie string from the user's Sobrus session, e.g.:
+        "current_country_code=ma; SBSID2=ght49q17..."
+    csrf_token:
+        The X-CSRF-TOKEN header value from the Sobrus session.
     """
 
-    def __init__(self, config, username: str, password: str) -> None:
-        self.config   = config
-        self.username = username
-        self.password = password
-        self.base     = config.domain.rstrip("/")
+    def __init__(self, sobrus_cookie: str, csrf_token: str = "") -> None:
+        self.sobrus_cookie = sobrus_cookie
+        self.csrf_token    = csrf_token
         self._session: AsyncSession | None = None
 
-    async def __aenter__(self) -> "GrossisteClient":
+    async def __aenter__(self) -> "SobrusClient":
         self._session = AsyncSession(impersonate="chrome", timeout=30)
         return self
 
@@ -77,256 +75,232 @@ class GrossisteClient:
     @property
     def session(self) -> AsyncSession:
         if self._session is None:
-            raise RuntimeError("Use 'async with GrossisteClient(config, user, pwd) as client:'")
+            raise RuntimeError("Use 'async with SobrusClient(cookie) as client:'")
         return self._session
 
-    # -------------------------------------------------------------------------
-    # Authentication
-    # -------------------------------------------------------------------------
-
-    async def login(self) -> None:
-        """
-        POST credentials to the login endpoint and store the session cookie.
-        Credentials come from the constructor — passed through from ERP payload.
-        Raises GrossisteAuthError if login fails.
-        """
-        url = f"{self.base}{self.config.login_path}"
-        logger.info("[%s] Logging in as %s...", self.config.name, self.username)
-
-        resp = await self.session.post(
-            url,
-            data={
-                "username": self.username,
-                "password": self.password,
-            },
-        )
-
-        # Treat any non-2xx or redirect back to login as failure
-        if resp.status_code not in (200, 201, 302):
-            raise GrossisteAuthError(
-                f"[{self.config.name}] Login failed — HTTP {resp.status_code}"
-            )
-
-        # Some sites redirect to dashboard on success, back to /login on failure
-        if self.config.login_path in resp.url:
-            raise GrossisteAuthError(
-                f"[{self.config.name}] Login failed — redirected back to login page"
-            )
-
-        logger.info("[%s] Login successful.", self.config.name)
-
-    # -------------------------------------------------------------------------
-    # Product catalogue
-    # -------------------------------------------------------------------------
-
-    async def fetch_product_list(self) -> list[dict[str, Any]]:
-        """
-        Fetch the full product catalogue.
-
-        The API returns a JavaScript page containing:
-            var products = [{CODE_PRODU, NOM_PRODUI, PRIX_PHAR, PPM, FORME_PROD, PA}, ...]
-
-        Returns
-        -------
-        list[dict]
-            Parsed product records ready for DB upsert.
-        """
-        url = f"{self.base}{self.config.products_path}"
-        logger.info("[%s] Fetching product catalogue...", self.config.name)
-
-        resp = await self.session.get(url)
-        if resp.status_code != 200:
-            raise GrossisteAPIError(
-                f"[{self.config.name}] Product list returned HTTP {resp.status_code}"
-            )
-
-        products = self._parse_product_list(resp.text)
-        logger.info("[%s] Fetched %d products.", self.config.name, len(products))
-        return products
-
-    def _parse_product_list(self, html: str) -> list[dict[str, Any]]:
-        """
-        Extract the products JSON array from the JavaScript page.
-
-        Handles: var products = [...];
-        """
-        match = re.search(r"var\s+products\s*=\s*(\[.*?\]);", html, re.DOTALL)
-        if not match:
-            raise GrossisteAPIError(
-                f"[{self.config.name}] Could not find 'var products = [...]' in response. "
-                f"Response length: {len(html)} chars. "
-                f"First 500 chars: {html[:500]}"
-            )
-
-        try:
-            raw = json.loads(match.group(1))
-        except json.JSONDecodeError as exc:
-            raise GrossisteAPIError(
-                f"[{self.config.name}] Failed to parse products JSON: {exc}"
-            ) from exc
-
-        # Normalise field names to our internal snake_case
-        products = []
-        for item in raw:
-            prix = item.get("PRIX_PHAR") or "0"
-            ppm  = item.get("PPM") or "0"
-            pa   = item.get("PA") or ""
-            products.append({
-                "code":             str(item.get("CODE_PRODU", "")).strip(),
-                "name":             str(item.get("NOM_PRODUI", "")).strip(),
-                "prix_pharmacien":  self._parse_decimal(prix),
-                "ppm":              self._parse_decimal(ppm),
-                "pa":               self._parse_decimal(pa) if pa else None,
-                "forme":            str(item.get("FORME_PROD", "")).strip(),
-            })
-
-        return [p for p in products if p["code"]]  # skip empty codes
-
-    @staticmethod
-    def _parse_decimal(value: str) -> float | None:
-        """Parse a price string to float, returning None if invalid or zero."""
-        try:
-            f = float(str(value).replace(",", ".").strip())
-            return f if f > 0 else None
-        except (ValueError, TypeError):
-            return None
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Accept":          "application/json",
+            "Content-Type":    "application/json",
+            "Cookie":          self.sobrus_cookie,
+            "Origin":          "https://app.pharma.sobrus.com",
+            "Referer":         "https://app.pharma.sobrus.com/",
+        }
+        if self.csrf_token:
+            headers["X-CSRF-TOKEN"] = self.csrf_token
+        return headers
 
     # -------------------------------------------------------------------------
     # Availability check
     # -------------------------------------------------------------------------
 
-    async def check_availability(self, product_code: str) -> bool:
-        """
-        Check whether a single product is in stock.
-
-        Calls GET /GetProd/{code} and interprets the boolean response.
-
-        Parameters
-        ----------
-        product_code:
-            The CODE_PRODU value (e.g. "5230").
-
-        Returns
-        -------
-        bool
-            True if in stock, False if out of stock.
-        """
-        url = f"{self.base}{self.config.products_path}/{product_code}"
-        logger.debug("[%s] Checking availability for %s...", self.config.name, product_code)
-
-        resp = await self.session.get(url)
-
-        if resp.status_code == 404:
-            logger.warning("[%s] Product %s not found (404).", self.config.name, product_code)
-            return False
-
-        if resp.status_code != 200:
-            raise GrossisteAPIError(
-                f"[{self.config.name}] Availability check for {product_code} "
-                f"returned HTTP {resp.status_code}"
-            )
-
-        return self._parse_availability(resp.text, product_code)
-
-    def _parse_availability(self, body: str, product_code: str) -> bool:
-        """
-        Parse the availability response.
-
-        Expected responses (adjust once actual API is tested):
-          - JSON boolean:    true / false
-          - JSON object:     {"inStock": true} or {"disponible": 1}
-          - Plain text:      "1" / "0" or "true" / "false"
-        """
-        body = body.strip()
-
-        # Try JSON first
-        try:
-            data = json.loads(body)
-            if isinstance(data, bool):
-                return data
-            if isinstance(data, int):
-                return data > 0
-            if isinstance(data, dict):
-                # Look for common boolean keys
-                for key in ("inStock", "in_stock", "disponible", "available", "stock"):
-                    if key in data:
-                        val = data[key]
-                        return bool(val) if not isinstance(val, str) else val.lower() == "true"
-        except json.JSONDecodeError:
-            pass
-
-        # Plain text fallback
-        lower = body.lower()
-        if lower in ("true", "1", "yes", "oui", "disponible"):
-            return True
-        if lower in ("false", "0", "no", "non", "indisponible"):
-            return False
-
-        logger.warning(
-            "[%s] Unexpected availability response for %s: %r — defaulting to False",
-            self.config.name, product_code, body[:100],
-        )
-        return False
-
-    # -------------------------------------------------------------------------
-    # Order placement (SKELETON — endpoint and payload TBD)
-    # -------------------------------------------------------------------------
-
-    async def place_order(
+    async def check_availability(
         self,
-        product_code: str,
-        quantity: int = 1,
-        notes: str = "",
+        supplier_id: int,
+        sobrus_product_id: int,
     ) -> dict[str, Any]:
         """
-        Place a purchase order with the grossiste.
+        Check whether a product is available at a grossiste via Sobrus.
 
-        ⚠️  SKELETON — the actual endpoint URL and request payload are not yet
-        known. This method logs the intent and returns a placeholder response.
-        Replace the body once the API is documented.
+        POST /purchaseorders/check-availability
+          ?supplier_id={supplier_id}&products={sobrus_product_id}
 
         Parameters
         ----------
-        product_code:
-            The CODE_PRODU to order.
-        quantity:
-            Number of units to order.
-        notes:
-            Optional order notes.
+        supplier_id:
+            Sobrus internal supplier ID (e.g. GPM=1, Sophasais=1570, Lodimed=346).
+        sobrus_product_id:
+            Sobrus internal product ID (e.g. 148194).
 
         Returns
         -------
         dict
-            API response (or placeholder when endpoint is TBD).
+            e.g. {"supplierId": 363, "isAvailable": True}
         """
-        url = f"{self.base}{self.config.order_path}"
+        url = (
+            f"{SOBRUS_API_BASE}/purchaseorders/check-availability"
+            f"?supplier_id={supplier_id}&products={sobrus_product_id}"
+        )
+        logger.info(
+            "Checking availability: supplier=%s product=%s",
+            supplier_id, sobrus_product_id,
+        )
 
-        # TODO: Replace with actual payload structure once API is documented
+        resp = await self.session.post(url, json={}, headers=self._headers())
+
+        if resp.status_code == 401:
+            raise SobrusAuthError(
+                "Sobrus session expired or invalid — the user needs to log in again."
+            )
+        if resp.status_code != 200:
+            raise SobrusAPIError(
+                f"check-availability returned HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+
+        try:
+            data = resp.json()
+        except Exception:
+            raise SobrusAPIError(
+                f"check-availability returned non-JSON: {resp.text[:200]}"
+            )
+
+        logger.info(
+            "Availability result: supplier=%s product=%s → %s",
+            supplier_id, sobrus_product_id, data,
+        )
+        return data
+
+    # -------------------------------------------------------------------------
+    # Order placement (SKELETON — endpoint to confirm)
+    # -------------------------------------------------------------------------
+
+    async def place_order(
+        self,
+        supplier_id: int,
+        sobrus_product_id: int,
+        quantity: int = 1,
+        unit_price: float | None = None,
+        sale_price: float | None = None,
+        tax_id: int = 35,
+        owner_id: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        """
+        Place a purchase order via Sobrus.
+
+        POST /purchaseorders/create
+
+        Parameters
+        ----------
+        supplier_id:
+            Sobrus internal supplier ID.
+        sobrus_product_id:
+            Sobrus internal product ID (the "ID" field in the payload).
+        quantity:
+            Number of units to order.
+        unit_price:
+            Purchase price per unit (PRIX_PHAR from grossiste catalogue).
+        sale_price:
+            Retail sale price (PPM or current retail price).
+        tax_id:
+            Tax ID — defaults to 35 (observed in real payload).
+        owner_id:
+            Sobrus user/owner ID. Taken from the authenticated session.
+        notes:
+            Optional order notes (maps to "comment").
+        """
+        from datetime import date
+
+        url = f"{SOBRUS_API_BASE}/purchaseorders/create"
+
         payload = {
-            "product_code": product_code,
-            "quantity":     quantity,
-            "notes":        notes,
-            # "delivery_address": "...",  # TBD
-            # "payment_method":   "...",  # TBD
+            "products": [
+                {
+                    "ID":                  sobrus_product_id,
+                    "quantity":            quantity,
+                    "unit_price":          str(unit_price) if unit_price else "0.00",
+                    "unit_original_price": unit_price or 0,
+                    "purchase_price":      unit_price or 0,
+                    "sale_price":          sale_price or 0,
+                    "tax_id":              tax_id,
+                    "discount_type":       "percentage",
+                    "discount":            "0.00",
+                    "available":           -1,
+                    "product_price_id":    "",
+                }
+            ],
+            "products_details":                  [],
+            "purchase_order_date":               date.today().isoformat(),
+            "global_discount_application_type":  "each_product",
+            "global_discount_type":              "percentage",
+            "supplier_id":                       str(supplier_id),
+            "contact_id":                        "",
+            "orderOnline":                       "false",
+            "owner_id":                          owner_id,
+            "status_action":                     "approve",
+            "comment":                           notes or None,
         }
 
         logger.info(
-            "[%s] SKELETON: Would POST order to %s — code=%s qty=%d",
-            self.config.name, url, product_code, quantity,
+            "Placing order: supplier=%s product=%s qty=%d price=%s",
+            supplier_id, sobrus_product_id, quantity, unit_price,
         )
-        logger.debug("[%s] Order payload (TBD): %s", self.config.name, payload)
 
-        # TODO: Uncomment once endpoint is confirmed
-        # resp = await self.session.post(url, json=payload)
-        # if resp.status_code not in (200, 201):
-        #     raise GrossisteAPIError(
-        #         f"[{self.config.name}] Order failed — HTTP {resp.status_code}: {resp.text[:200]}"
-        #     )
-        # return resp.json()
+        resp = await self.session.post(url, json=payload, headers=self._headers())
 
-        return {
-            "status":    "skeleton",
-            "message":   "Order endpoint not yet implemented — placeholder response",
-            "would_send": payload,
-            "to_url":    url,
-        }
+        if resp.status_code == 401:
+            raise SobrusAuthError("Sobrus session expired or invalid.")
+        if resp.status_code not in (200, 201):
+            raise SobrusAPIError(
+                f"Order creation failed — HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+
+        try:
+            create_result = resp.json()
+        except Exception:
+            raise SobrusAPIError(f"Order response was not JSON: {resp.text[:200]}")
+
+        logger.info("Order created: %s", create_result)
+
+        # Fetch full order details if we got an order ID back
+        order_id = (
+            create_result.get("data", {}).get("ID")
+            or create_result.get("ID")
+            or create_result.get("id")
+        )
+        if order_id:
+            try:
+                details = await self.get_order(order_id)
+                return details
+            except SobrusAPIError as exc:
+                logger.warning("Could not fetch order details after creation: %s", exc)
+
+        return create_result
+
+    async def get_order(self, order_id: str | int) -> dict[str, Any]:
+        """
+        Fetch full order details after creation.
+        GET /purchaseorders/{order_id}
+        """
+        url = f"{SOBRUS_API_BASE}/purchaseorders/{order_id}"
+        logger.info("Fetching order details: %s", order_id)
+
+        resp = await self.session.get(url, headers=self._headers())
+
+        if resp.status_code == 401:
+            raise SobrusAuthError("Sobrus session expired.")
+        if resp.status_code != 200:
+            raise SobrusAPIError(
+                f"GET order {order_id} returned HTTP {resp.status_code}"
+            )
+
+        return resp.json()
+
+    # -------------------------------------------------------------------------
+    # Sync Sobrus product IDs
+    # -------------------------------------------------------------------------
+
+    async def fetch_supplier_products(self, supplier_id: int) -> list[dict[str, Any]]:
+        """
+        Fetch the product list for a supplier from the Sobrus API.
+        Used to populate GrossisteProduct.sobrus_product_id.
+
+        ⚠️  Endpoint TBD — inspect the Sobrus app to find how it loads
+        the grossiste product catalogue. Look for a GET request when
+        browsing a supplier's products in the Sobrus purchase order screen.
+        """
+        # TODO: Find and confirm the actual endpoint
+        url = f"{SOBRUS_API_BASE}/purchaseorders/products?supplier_id={supplier_id}"
+
+        logger.info("Fetching Sobrus product list for supplier %s...", supplier_id)
+
+        resp = await self.session.get(url, headers=self._headers())
+
+        if resp.status_code == 401:
+            raise SobrusAuthError("Sobrus session expired.")
+        if resp.status_code != 200:
+            raise SobrusAPIError(
+                f"Product list returned HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+
+        return resp.json()

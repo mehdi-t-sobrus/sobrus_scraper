@@ -4,23 +4,21 @@ src/backend/grossiste/models.py
 Django models for the grossiste (wholesale distributor) integration.
 
 Architecture:
-  GrossisteConfig    — credentials + domain per distributor (3 total)
+  GrossisteConfig    — one row per distributor (domain, Sobrus supplier ID)
   GrossisteProduct   — wholesale product linked to MasterProduct
-                       Parallel to SiteProduct but for wholesale prices
-  GrossisteOrder     — purchase order skeleton (endpoint TBD)
+  GrossisteOrder     — purchase order record
 
-Pricing model:
-  MasterProduct
-  ├── SiteProduct       → retail prices  (what consumers pay on e-commerce sites)
-  └── GrossisteProduct  → wholesale prices (what a seller pays to stock from grossiste)
+Availability + ordering flow:
+  All calls go through api.pharma.sobrus.com — we never call the grossiste
+  directly. The Sobrus session cookie is passed through per-request from
+  the frontend. No credentials are stored here.
 
-This lets us answer:
-  "I can buy ISDIN SPF50 from GPM at 55 MAD and it sells on cotepara for 270 MAD"
+  POST api.pharma.sobrus.com/purchaseorders/check-availability
+    ?supplier_id={config.sobrus_supplier_id}&products={product.sobrus_product_id}
+  Cookie: {sobrus_session_cookie}
 """
 
 from __future__ import annotations
-
-import uuid
 
 from django.db import models
 from django.utils.translation import gettext_lazy as _
@@ -29,25 +27,33 @@ from django.utils.translation import gettext_lazy as _
 class GrossisteConfig(models.Model):
     """
     Configuration for one grossiste distributor.
-    Stores domain and API paths only — NO credentials.
-
-    Credentials (username + password) are passed per-request from the
-    external ERP system and used on-the-fly. They are never stored here.
+    Stores domain, API paths, and Sobrus supplier ID.
+    NO credentials — auth handled by Sobrus session cookie passed per-request.
     """
 
     name = models.CharField(
         max_length=128,
         unique=True,
-        help_text=_("Identifier used in API calls, e.g. 'GPM', 'COPHARM', 'SOMAPHARM'"),
+        help_text=_("Identifier, e.g. 'GPM', 'Sophasais', 'Lodimed'"),
     )
     domain = models.URLField(
         max_length=256,
         unique=True,
-        help_text=_("Base URL, e.g. https://gpm.ma"),
+        help_text=_("Base URL of the grossiste site, e.g. https://gpm.ma"),
     )
     is_active = models.BooleanField(default=True)
 
-    # API path overrides (defaults work for all 3 known sites)
+    # Sobrus Pharma internal supplier ID
+    # Used in api.pharma.sobrus.com/purchaseorders/check-availability?supplier_id=X
+    sobrus_supplier_id = models.IntegerField(
+        null=True, blank=True,
+        help_text=_(
+            "Sobrus internal supplier ID. "
+            "GPM=1, Sophasais=1570, Lodimed=346"
+        ),
+    )
+
+    # API path overrides (kept for direct grossiste access if ever needed)
     login_path    = models.CharField(max_length=128, default="/login")
     products_path = models.CharField(max_length=128, default="/GetProd")
     order_path    = models.CharField(max_length=128, default="/order")
@@ -67,25 +73,20 @@ class GrossisteConfig(models.Model):
 
 class GrossisteProduct(models.Model):
     """
-    A product from a grossiste catalogue, optionally linked to a MasterProduct.
-
+    A product from a grossiste catalogue.
     Parallel to SiteProduct — both hang off MasterProduct but represent
-    different sides of the market:
-      SiteProduct       → retail listing  (B2C price consumers pay)
-      GrossisteProduct  → wholesale listing (B2B price sellers pay to stock)
+    different sides of the market (wholesale vs retail).
 
-    Fields map directly from the API response:
+    Fields from extracted JS catalogue:
       CODE_PRODU  → code
       NOM_PRODUI  → name
-      PRIX_PHAR   → prix_pharmacien (pharmacy buy price, excl. tax)
-      PPM         → ppm (prix public maximum — max legal retail price)
-      FORME_PROD  → forme (dosage form: CO=tablet, GE=capsule, SI=syrup…)
-      PA          → pa (prix d'achat — purchase price, often empty)
+      PRIX_PHAR   → prix_pharmacien
+      PPM         → ppm
+      FORME_PROD  → forme
+      PA          → pa
 
-    Matching:
-      master_product is populated by the matching pipeline (same 6-tier
-      approach as SiteProduct: EAN exact → name fuzzy → vector similarity).
-      Until matched, master_product is NULL.
+    sobrus_product_id is fetched from the Sobrus API and is required
+    for check-availability and order calls.
     """
 
     grossiste = models.ForeignKey(
@@ -96,50 +97,46 @@ class GrossisteProduct(models.Model):
     master_product = models.ForeignKey(
         "products.MasterProduct",
         on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
+        null=True, blank=True,
         related_name="grossiste_products",
-        help_text=_(
-            "Linked MasterProduct — populated by the matching pipeline. "
-            "NULL means not yet matched."
-        ),
+        help_text=_("Linked MasterProduct — populated by the matching pipeline."),
     )
 
-    # Raw fields from grossiste API
-    code  = models.CharField(
-        max_length=32,
-        db_index=True,
-        help_text=_("CODE_PRODU — unique product code within this grossiste"),
-    )
+    # Raw fields from grossiste catalogue
+    code  = models.CharField(max_length=32, db_index=True,
+                             help_text=_("CODE_PRODU"))
     name  = models.CharField(max_length=512, help_text=_("NOM_PRODUI"))
     prix_pharmacien = models.DecimalField(
         max_digits=12, decimal_places=3, null=True, blank=True,
-        help_text=_("PRIX_PHAR — pharmacy buy price (MAD excl. tax)"),
+        help_text=_("PRIX_PHAR — pharmacy buy price (MAD)"),
     )
     ppm = models.DecimalField(
         max_digits=12, decimal_places=2, null=True, blank=True,
-        help_text=_("PPM — prix public maximum / max legal retail price (MAD)"),
+        help_text=_("PPM — prix public maximum (MAD)"),
     )
     pa = models.DecimalField(
         max_digits=12, decimal_places=3, null=True, blank=True,
         help_text=_("PA — prix d'achat (often empty)"),
     )
-    forme = models.CharField(
-        max_length=8, blank=True, default="",
-        help_text=_("FORME_PROD — dosage form code (CO, GE, SI, GO, SP, …)"),
+    forme = models.CharField(max_length=8, blank=True, default="",
+                             help_text=_("FORME_PROD — dosage form code"))
+
+    # Sobrus internal product ID — required for API calls
+    sobrus_product_id = models.IntegerField(
+        null=True, blank=True,
+        db_index=True,
+        help_text=_(
+            "Sobrus internal product ID used in "
+            "api.pharma.sobrus.com/purchaseorders/check-availability. "
+            "Fetched via Sobrus API."
+        ),
     )
 
     # Match metadata
-    match_confidence = models.FloatField(
-        null=True, blank=True,
-        help_text=_("Confidence score from the matching pipeline (0–1)."),
-    )
-    manually_verified = models.BooleanField(
-        default=False,
-        help_text=_("Tick after manually confirming the MasterProduct link is correct."),
-    )
+    match_confidence  = models.FloatField(null=True, blank=True)
+    manually_verified = models.BooleanField(default=False)
 
-    # Availability — refreshed on demand via GetProd/{code}
+    # Availability — refreshed via Sobrus API on demand
     in_stock = models.BooleanField(
         null=True, blank=True, default=None,
         help_text=_("None = not yet checked"),
@@ -155,10 +152,11 @@ class GrossisteProduct(models.Model):
         unique_together     = [("grossiste", "code")]
         ordering            = ["name"]
         indexes             = [
-            models.Index(fields=["code"],               name="idx_gros_code"),
-            models.Index(fields=["name"],               name="idx_gros_name"),
+            models.Index(fields=["code"],            name="idx_gros_code"),
+            models.Index(fields=["name"],            name="idx_gros_name"),
             models.Index(fields=["grossiste", "in_stock"], name="idx_gros_stock"),
-            models.Index(fields=["master_product"],     name="idx_gros_master"),
+            models.Index(fields=["master_product"],  name="idx_gros_master"),
+            models.Index(fields=["sobrus_product_id"], name="idx_gros_sobrus_id"),
         ]
 
     def __str__(self) -> str:
@@ -178,53 +176,42 @@ class GrossisteProduct(models.Model):
 
 class GrossisteOrder(models.Model):
     """
-    Purchase order skeleton — endpoint and payload TBD.
-    Created when a purchase is triggered from the Admin or API.
+    Purchase order placed via api.pharma.sobrus.com/purchaseorders/create.
     """
 
     class Status(models.TextChoices):
         DRAFT     = "draft",     _("Draft — not yet submitted")
-        SUBMITTED = "submitted", _("Submitted to grossiste")
+        SUBMITTED = "submitted", _("Submitted to Sobrus")
         CONFIRMED = "confirmed", _("Confirmed by grossiste")
         FAILED    = "failed",    _("Submission failed")
 
-    grossiste = models.ForeignKey(
-        GrossisteConfig,
-        on_delete=models.PROTECT,
-        related_name="orders",
-    )
-    product = models.ForeignKey(
-        GrossisteProduct,
-        on_delete=models.PROTECT,
-        related_name="orders",
-    )
+    grossiste  = models.ForeignKey(GrossisteConfig, on_delete=models.PROTECT, related_name="orders")
+    product    = models.ForeignKey(GrossisteProduct, on_delete=models.PROTECT,
+                                   related_name="orders", null=True, blank=True)
     quantity   = models.PositiveIntegerField(default=1)
-    unit_price = models.DecimalField(
-        max_digits=12, decimal_places=3, null=True, blank=True,
-        help_text=_("Prix pharmacien at time of order"),
-    )
-    status = models.CharField(
-        max_length=16,
-        choices=Status.choices,
-        default=Status.DRAFT,
-        db_index=True,
-    )
+    unit_price = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True,
+                                     help_text=_("Prix pharmacien / purchase price at time of order"))
+    sale_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True,
+                                     help_text=_("Retail sale price at time of order"))
+    status     = models.CharField(max_length=16, choices=Status.choices,
+                                  default=Status.DRAFT, db_index=True)
 
-    # Response from grossiste API (populated after submission)
-    external_order_id = models.CharField(
-        max_length=256, blank=True, default="",
-        help_text=_("Order ID returned by the grossiste API"),
-    )
-    response_payload = models.JSONField(
-        null=True, blank=True,
-        help_text=_("Full API response for debugging"),
-    )
-    error_message = models.TextField(blank=True, default="")
-    notes         = models.TextField(blank=True, default="")
+    # Sobrus order details (populated after successful creation)
+    sobrus_order_id        = models.CharField(max_length=64, blank=True, default="",
+                                              help_text=_("Sobrus internal order ID (e.g. 9757341)"))
+    sobrus_transaction_num = models.CharField(max_length=64, blank=True, default="",
+                                              help_text=_("Sobrus transaction number (e.g. BC-3579)"))
+    sobrus_status          = models.CharField(max_length=64, blank=True, default="",
+                                              help_text=_("Sobrus order status (e.g. approved)"))
 
+    response_payload = models.JSONField(null=True, blank=True,
+                                        help_text=_("Full Sobrus API response"))
+    error_message    = models.TextField(blank=True, default="")
+    notes            = models.TextField(blank=True, default="")
+
+    submitted_at = models.DateTimeField(null=True, blank=True)
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
-    submitted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name        = "Grossiste Order"
@@ -232,7 +219,9 @@ class GrossisteOrder(models.Model):
         ordering            = ["-created_at"]
 
     def __str__(self) -> str:
-        return f"Order #{self.pk} — {self.product.name} x{self.quantity} [{self.status}]"
+        ref = self.sobrus_transaction_num or f"#{self.pk}"
+        name = self.product.name if self.product else "Unknown product"
+        return f"{ref} — {name} x{self.quantity} [{self.status}]"
 
     @property
     def total_price(self):
